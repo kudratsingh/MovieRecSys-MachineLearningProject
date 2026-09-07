@@ -83,8 +83,8 @@ Open <http://localhost:3001> and sign in as **`demo` / `demo`** — a dev-only a
 `infra/keycloak/realms/demo-realm.json`, labelled as such in the file and not a secret. The demo
 stack runs with the auth bypass disabled, so this is the real authorization-code + PKCE flow.
 
-It runs an isolated Compose project against a reviewed 120-title catalog, so the 25M dataset is not
-required. Warm personas are served the `item-item-cosine+lightgbm` policy with checksum-pinned model
+It runs an isolated Compose project against the full 62,423-title MovieLens catalog, seeded from a
+committed snapshot with 120 reviewed titles postered on top, so the 25M dataset is not required. Warm personas are served the `item-item-cosine+lightgbm` policy with checksum-pinned model
 versions; the Cold Start persona gets the explicit `popularity` fallback. `make demo-audits` prints
 the newest durable audit rows — the exact predictions, features, versions and stage timings behind
 what you just saw. TMDB posters are optional: set `TMDB_READ_ACCESS_TOKEN` in `.env` first, or leave

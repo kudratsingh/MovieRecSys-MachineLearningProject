@@ -13,7 +13,7 @@ cross-tenant probe lives here rather than under `tests/` — the image copies
 | Directory | Job | Runs via |
 |---|---|---|
 | [`load/`](#load--the-latency-gate-and-its-evidence) | Measure the p99 SLO, and check the serving promises a percentile cannot express | `make demo-load-smoke`, `demo-load-pages`, `demo-reliability-check`, `prod-load` |
-| [`personas/`](#personas--the-four-demo-identities) | Four named demo identities and the reviewed 120-title catalog they explore | `make demo-seed`, `make catalog-verify` |
+| [`personas/`](#personas--the-four-demo-identities) | Four named demo identities, the reviewed 120-title catalog they explore, and the full 62,423-title MovieLens catalog underneath it | `make demo-seed`, `make catalog-verify` |
 | [`smoke/`](#smoke--is-this-deployment-actually-working) | Readiness and behavioural checks against a deployed stack | `make demo-smoke`, `make demo-audits` |
 | [`tenant_isolation/`](#tenant_isolation--the-deployable-cross-tenant-probe) | Prove cross-tenant refusal against a running deployment | `make prod-verify` (as check V-6) |
 
@@ -87,10 +87,12 @@ Keycloak identity past any sane per-subject rate. Against that target the check
 records the absence in words and names the fact that every deployed environment
 should show the enforced branch instead.
 
-The degraded-metadata check is the one place a `skipped` is correct: the catalog
-is now 120/120 postered, so it scans up to ten pages for a poster-less title and,
-finding none, reports why rather than inventing one. The degraded rendering
-itself is held by `web/e2e/poster-fallback.spec.ts`.
+The degraded-metadata check used to be the one place a `skipped` was correct:
+with a 120/120 postered catalog it scanned ten pages, found no poster-less title,
+and reported why rather than inventing one. The full MovieLens catalog under the
+reviewed 120 hands it 62,303 of them, so it now exercises the branch it was
+written for on every run. The degraded rendering itself is held by
+`web/e2e/poster-fallback.spec.ts`.
 
 ## `personas/` — the four demo identities
 
@@ -114,6 +116,24 @@ dismisses a title cannot tip them onto the fallback mid-run.
 poster URL, an overview, and a `details` object. `personas.json` holds the four
 identities and their histories. `seed.py` is idempotent — deterministic ids via
 `uuid5`, a pinned base timestamp — so re-seeding produces the same rows.
+
+`movielens-catalog.csv.gz` is the floor those 120 titles sit on: all 62,423
+MovieLens-25M titles with their genres and TMDB ids, and nothing else.
+A retriever fitted on the full dataset ranks ids from a 34,461-item vocabulary,
+and while the demo database held only the reviewed titles none of those ids were
+rows — hydration returned nothing and the API answered every request with the
+popularity fallback, correctly and uselessly. The snapshot is committed rather
+than read from `data/raw/ml-25m` at seed time because the seeder runs inside the
+API image, which copies `synthetic/` and never `data/`, and because a catalog
+that appeared only on machines that had run `dvc pull` would make the
+reproducibility gate that trains off this database machine-dependent.
+`build_movielens_catalog.py` regenerates it; the reviewed fixture is written
+first and wins every column it owns, so a bulk load can never revert an
+editorial title or a trimmed genre string.
+
+Only the reviewed 120 carry artwork. Enriching 62k titles is a TMDB budget this
+project has no reason to spend, so Browse outside them renders the documented
+placeholder — sparser than before, not richer, and deliberately so.
 
 `enrich_posters.py` and `enrich_details.py` are **offline** passes that write
 TMDB data into the fixture, which is what keeps the request path from fanning
@@ -149,7 +169,11 @@ which family should be answering.
 
 It also compares the API-served catalog metadata against the reviewed fixture,
 because a stale snapshot is invisible to every other check and very visible to a
-viewer: it is posters that never load.
+viewer: it is posters that never load. That walk sorts by popularity, and the
+reason is arithmetic: only the reviewed titles carry seeded interactions, so
+popularity puts all 120 in the first three pages, while the default title sort
+over a 62,423-title catalog reaches 1 of them in eight pages and passes by never
+looking at anything.
 
 Modes: `--readiness-only` (what `make demo-up` ends with), `--audits-only`
 (`make demo-audits`), and the full run (`make demo-smoke`).

@@ -111,7 +111,7 @@ Two practical notes:
 
 The dev environment is the other side of this: `make up-dev` starts `docker-compose.yml` +
 `docker-compose.demo.yml` — the stores, a Keycloak with dev credentials, and the application layer at
-`ENVIRONMENT=dev` over the reviewed 120-title fixture. It is the only environment where the auth
+`ENVIRONMENT=dev` over the demo persona fixture. It is the only environment where the auth
 bypass is permitted at all, and it is documented in [`demo-runbook.md`](demo-runbook.md). There is
 deliberately no `docker-compose.dev.yml`; `tests/unit/test_prod_compose.py` records why.
 
@@ -818,5 +818,7 @@ Stated plainly so nobody reads an aspiration as a description of what is running
   per-tenant counts and latencies and there is no auth story for a scraper yet. Phase 5 owns it,
   along with the Grafana that would consume it.
 - **`feature_store.*` is never pruned.** One generation per release, and `user_item_features` is a
-  users × movies cross join. Small at 120 titles, unbounded in principle — D8 is the decision that
-  fixes it.
+  users × movies cross join. That was 960 rows a generation while the catalog held 120 titles; since
+  the catalog became the full MovieLens 62,423 it is 499,384 rows a generation (8 rated users), and
+  every release appends another. No longer merely unbounded in principle — D8 is the decision that
+  fixes it, and it now has a schedule.

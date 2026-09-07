@@ -1,8 +1,9 @@
 # Local Demo Runbook
 
 This runbook starts the first repeatable MovieLens portfolio demo from a clean
-checkout. It uses a small reviewed MovieLens catalog snapshot; downloading or
-ingesting the 25M dataset is not required for the walkthrough. The full dataset
+checkout. It seeds the full 62,423-title MovieLens catalog from a committed
+snapshot, of which 120 reviewed titles carry posters and synopses; downloading
+or ingesting the 25M dataset is not required for the walkthrough. The full dataset
 remains the source for training and offline evaluation.
 
 ## Prerequisites
@@ -33,7 +34,8 @@ make demo-smoke
 `make up-dev` is the same thing under the name the multi-environment plan uses:
 this stack — `docker-compose.yml` for the stores and Keycloak, plus
 `docker-compose.demo.yml` for the application layer at `ENVIRONMENT=dev` over
-the reviewed 120-title fixture — **is** the dev environment. There is
+the demo fixture's 515 interactions over the full MovieLens catalog — **is** the
+dev environment. There is
 deliberately no `docker-compose.dev.yml`; the only job a third file would have
 is turning `DEV_AUTH_BYPASS` on, and this stack sets it to `"false"` precisely
 so the browser journeys and the load gate authenticate against real Keycloak
@@ -63,7 +65,8 @@ generated poster artwork, or set a TMDB API Read Access Token before
    network.
 
 `make demo-seed` can be run repeatedly. It preserves an existing full-ingest
-catalog, inserts only missing demo catalog rows, refreshes the 120-title local
+catalog, inserts only missing catalog rows — the reviewed 120 first, then the
+62,423-title MovieLens snapshot under them — refreshes the reviewed local
 metadata snapshot, and replaces the controlled demo persona/background
 interactions with the same deterministic fixture. It
 then materializes the tenant's Feast features, trains the deterministic

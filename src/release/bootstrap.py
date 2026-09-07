@@ -635,7 +635,8 @@ def run_seed(engine: Engine) -> dict[str, Any]:
         "personas": result.persona_count,
         "persona_ratings": result.persona_rating_count,
         "background_ratings": result.background_rating_count,
-        "visible_movies": result.visible_movie_count,
+        "catalog_movies": result.catalog_movie_count,
+        "reviewed_movies": result.reviewed_movie_count,
         "recommendable_movies": result.recommendable_movie_count,
         "poster_movies": result.poster_movie_count,
     }

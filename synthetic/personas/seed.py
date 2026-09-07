@@ -2,20 +2,41 @@
 
 from __future__ import annotations
 
+import csv
+import gzip
+import io
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
-from sqlalchemy import JSON, Connection, Engine, bindparam, create_engine, text
+from sqlalchemy import JSON, Connection, Engine, TextClause, bindparam, create_engine, text
 
 from src.config import Settings
 
 _FIXTURE_DIR = Path(__file__).parent
 _BASE_TIMESTAMP = 1_700_000_000
 _CATALOG_SNAPSHOT_AT = "2026-08-21T00:00:00+00:00"
+# The MovieLens release the snapshot below was projected from, and the date it
+# was taken. Both are literals for the same reason `_CATALOG_SNAPSHOT_AT` is:
+# `source_updated_at` must not move when a re-seed runs on a different day.
+_MOVIELENS_SNAPSHOT_AT = "2026-09-05T00:00:00+00:00"
+
+# Migration 0011's `ck_catalog_release_year` accepts 1878..2100. MovieLens ships
+# exactly one title below that floor (148054, "Passage de Venus (1874)"), so an
+# out-of-range year is dropped rather than the row — the alternative is the
+# whole catalog insert failing over one 19th-century short.
+_CATALOG_MIN_YEAR = 1878
+_CATALOG_MAX_YEAR = 2100
+
+# Postgres caps a statement at 65535 bind parameters and SQLAlchemy's
+# executemany batches by rows, not by parameters. Five thousand rows keeps every
+# statement here inside that ceiling without turning 62k inserts into 62k round
+# trips.
+_INSERT_CHUNK_SIZE = 5_000
 
 
 @dataclass(frozen=True)
@@ -49,7 +70,13 @@ class SeedResult:
     persona_count: int
     persona_rating_count: int
     background_rating_count: int
-    visible_movie_count: int
+    # Every title the seed leaves visible in `movie_catalog_metadata` — the full
+    # MovieLens catalog — against the reviewed subset that carries artwork and
+    # editorial copy. They were one number while the demo database held 120
+    # movies; they are 62,423 and 120 now, and conflating them is exactly how a
+    # sparse Browse grid would read as a healthy one.
+    catalog_movie_count: int
+    reviewed_movie_count: int
     recommendable_movie_count: int
     poster_movie_count: int
     detail_movie_count: int
@@ -121,14 +148,55 @@ def load_demo_catalog(
     return movies, background_user_ids
 
 
+def load_movielens_catalog(
+    path: Path = _FIXTURE_DIR / "movielens-catalog.csv.gz",
+) -> list[CatalogMovie]:
+    """Read the full MovieLens catalog snapshot the reviewed fixture sits inside.
+
+    The demo database used to hold only the 120 reviewed titles, which made it
+    unable to serve any retriever whose vocabulary is the real catalog: a
+    full-data encoder's top-ranked ids simply were not rows, hydration returned
+    nothing, and the API fell back to popularity. The snapshot is the floor the
+    reviewed fixture is laid on top of — titles, genres and TMDB ids only, no
+    artwork and no synopses, because enriching 62k titles is a TMDB budget this
+    project has no reason to spend (`enrich_posters.py` covers the 120 a viewer
+    actually browses).
+
+    Provenance and the regeneration command are in
+    ``synthetic/personas/build_movielens_catalog.py``.
+    """
+    with gzip.open(path, "rb") as archive:
+        reader = csv.DictReader(io.TextIOWrapper(archive, encoding="utf-8", newline=""))
+        movies = [
+            CatalogMovie(
+                movie_id=int(record["movieId"]),
+                title=record["title"],
+                genres=record["genres"],
+                tmdb_id=record["tmdbId"] or None,
+                release_year=_catalog_release_year(record["title"]),
+                poster_url=None,
+                overview=None,
+                details=None,
+            )
+            for record in reader
+        ]
+    if not movies:
+        raise ValueError(f"the MovieLens catalog snapshot is empty: {path}")
+    if len({movie.movie_id for movie in movies}) != len(movies):
+        raise ValueError("MovieLens catalog snapshot movie IDs must be unique")
+    return movies
+
+
 def seed_demo_personas(
     engine: Engine,
     *,
     persona_path: Path = _FIXTURE_DIR / "personas.json",
     catalog_path: Path = _FIXTURE_DIR / "catalog.json",
+    movielens_catalog_path: Path = _FIXTURE_DIR / "movielens-catalog.csv.gz",
 ) -> SeedResult:
     tenant_id, personas = load_personas(persona_path)
     catalog_movies, background_user_ids = load_demo_catalog(catalog_path)
+    movielens_movies = load_movielens_catalog(movielens_catalog_path)
     movie_ids = tuple(movie.movie_id for movie in catalog_movies)
 
     persona_rows = [
@@ -172,7 +240,17 @@ def seed_demo_personas(
     ]
 
     with engine.begin() as connection:
+        # Reviewed first, snapshot second, and the order is the decision: every
+        # snapshot write is an ON CONFLICT DO NOTHING, so whatever the reviewed
+        # fixture already put there wins. That is not incidental — the reviewed
+        # rows differ from raw MovieLens on 31 titles ("The Usual Suspects" for
+        # "Usual Suspects, The") and on three genre strings, and those edits are
+        # editorial choices a bulk load has no business reverting. It also keeps
+        # the ranker fixture's inputs byte-stable: `src/training/demo_artifacts`
+        # builds its feature index from an unfiltered read of `movies`, so a
+        # genre string changing under it would move `ranker.txt`.
         _ensure_demo_catalog(connection, catalog_movies)
+        _ensure_movielens_catalog(connection, movielens_movies)
         _replace_seed_rows(
             connection,
             tenant_id=tenant_id,
@@ -182,12 +260,15 @@ def seed_demo_personas(
             rating_rows=persona_ratings + background_ratings,
         )
 
+    catalog_ids = {movie.movie_id for movie in movielens_movies}
+    catalog_ids.update(movie.movie_id for movie in catalog_movies)
     return SeedResult(
         tenant_id=tenant_id,
         persona_count=len(persona_rows),
         persona_rating_count=len(persona_ratings),
         background_rating_count=len(background_ratings),
-        visible_movie_count=len(catalog_movies),
+        catalog_movie_count=len(catalog_ids),
+        reviewed_movie_count=len(catalog_movies),
         recommendable_movie_count=len({row["movie_id"] for row in background_ratings}),
         poster_movie_count=sum(movie.poster_url is not None for movie in catalog_movies),
         detail_movie_count=sum(movie.details is not None for movie in catalog_movies),
@@ -263,6 +344,77 @@ def _ensure_demo_catalog(connection: Connection, movies: list[CatalogMovie]) -> 
             for movie in movies
         ],
     )
+
+
+def _ensure_movielens_catalog(connection: Connection, movies: list[CatalogMovie]) -> None:
+    """Lay the full MovieLens catalog under whatever is already there.
+
+    Every statement is additive. A row that exists — because the reviewed
+    fixture just wrote it, or because a real ingest did — is left exactly as it
+    is, which is what makes the seed idempotent and what keeps this from being a
+    62,423-row overwrite of curated data on every ``make demo-seed``.
+
+    The metadata rows are honest about what they are: ``metadata_source =
+    'movielens'`` and ``source_status = 'unavailable'``, because MovieLens ships
+    a title and a genre string and nothing a poster grid wants. They are still
+    ``visible``, so Browse renders the whole catalog with placeholders outside
+    the reviewed 120 rather than pretending the other 62,303 titles do not
+    exist.
+    """
+    _execute_chunked(
+        connection,
+        text("""
+            INSERT INTO movies ("movieId", title, genres)
+            VALUES (:movie_id, :title, :genres)
+            ON CONFLICT ("movieId") DO NOTHING
+            """),
+        [
+            {"movie_id": movie.movie_id, "title": movie.title, "genres": movie.genres}
+            for movie in movies
+        ],
+    )
+    _execute_chunked(
+        connection,
+        text("""
+            INSERT INTO links ("movieId", "tmdbId")
+            VALUES (:movie_id, :tmdb_id)
+            ON CONFLICT ("movieId") DO UPDATE SET "tmdbId" = EXCLUDED."tmdbId"
+            WHERE links."tmdbId" IS NULL AND EXCLUDED."tmdbId" IS NOT NULL
+            """),
+        [{"movie_id": movie.movie_id, "tmdb_id": movie.tmdb_id} for movie in movies],
+    )
+    _execute_chunked(
+        connection,
+        text("""
+            INSERT INTO movie_catalog_metadata
+                (movie_id, sort_title, release_year, poster_url, overview, details,
+                 metadata_source, source_status, visible, source_updated_at)
+            VALUES
+                (:movie_id, :sort_title, :release_year, NULL, NULL, NULL,
+                 'movielens', 'unavailable', TRUE, :source_updated_at)
+            ON CONFLICT (movie_id) DO NOTHING
+            """),
+        [
+            {
+                "movie_id": movie.movie_id,
+                "sort_title": _sort_title(movie.title),
+                "release_year": movie.release_year,
+                "source_updated_at": _MOVIELENS_SNAPSHOT_AT,
+            }
+            for movie in movies
+        ],
+    )
+
+
+def _execute_chunked(
+    connection: Connection,
+    statement: TextClause,
+    rows: Sequence[dict[str, Any]],
+) -> None:
+    for start in range(0, len(rows), _INSERT_CHUNK_SIZE):
+        chunk = rows[start : start + _INSERT_CHUNK_SIZE]
+        if chunk:
+            connection.execute(statement, list(chunk))
 
 
 def _replace_seed_rows(
@@ -393,7 +545,8 @@ def main() -> None:
     # yesterday's snapshot, which is exactly how 24 posters survived a
     # 120-poster fixture for a day.
     print(
-        f"Catalog snapshot: {result.visible_movie_count} visible, "
+        f"Catalog snapshot: {result.catalog_movie_count} visible titles, "
+        f"{result.reviewed_movie_count} reviewed, "
         f"{result.poster_movie_count} with posters, "
         f"{result.detail_movie_count} with detail payloads."
     )
@@ -403,6 +556,14 @@ def _release_year_from_title(title: str) -> int | None:
     if len(title) >= 6 and title.endswith(")") and title[-5:-1].isdigit():
         return int(title[-5:-1])
     return None
+
+
+def _catalog_release_year(title: str) -> int | None:
+    """The parsed year, or NULL when the catalog's check constraint would reject it."""
+    year = _release_year_from_title(title)
+    if year is None or not _CATALOG_MIN_YEAR <= year <= _CATALOG_MAX_YEAR:
+        return None
+    return year
 
 
 def _sort_title(title: str) -> str:

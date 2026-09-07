@@ -515,7 +515,8 @@ def test_seed_reports_what_it_wrote(monkeypatch: pytest.MonkeyPatch) -> None:
         persona_count=4,
         persona_rating_count=27,
         background_rating_count=480,
-        visible_movie_count=120,
+        catalog_movie_count=62423,
+        reviewed_movie_count=120,
         recommendable_movie_count=120,
         poster_movie_count=24,
     )
@@ -526,6 +527,11 @@ def test_seed_reports_what_it_wrote(monkeypatch: pytest.MonkeyPatch) -> None:
     assert summary["tenant_id"] == "demo"
     assert summary["personas"] == 4
     assert summary["poster_movies"] == 24
+    # Two numbers, because they are now two orders of magnitude apart: a release
+    # log that printed only one would make a catalog with no artwork behind it
+    # look like a fully enriched one.
+    assert summary["catalog_movies"] == 62423
+    assert summary["reviewed_movies"] == 120
 
 
 # --------------------------------------------------------------------------

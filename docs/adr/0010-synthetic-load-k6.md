@@ -400,6 +400,27 @@ over one window and is a per-commit cost in milliseconds.
   regression starts happening, the honest response is a threshold on syncs per
   request, not a slower disk.
 
+### 2026-09-06 — full-catalog materialization raises the tmpfs ceiling
+
+PR #178 keeps the demo interaction fixture small but expands its catalog from
+120 to 62,423 titles. That makes `user_item_features` a 499,384-row cross
+product. On the GitHub amd64 runner its materialization spilled past the 2 GiB
+PGDATA tmpfs and PostgreSQL failed loudly in `base/pgsql_tmp`, exactly as the
+2026-08-28 risk predicted; no latency window ran and no threshold was involved.
+
+The same seed and materialization was repeated locally under an 8 GiB
+measurement ceiling. The finished database was 80 MiB, PGDATA settled at 270
+MiB, and one-second samples observed a peak of 832 MiB total with 690 MiB in
+`base/pgsql_tmp`. The architecture-specific query plan matters: amd64 CI used
+more than twice the arm64 peak and exhausted the former cap. The retained
+measurement is under `artifacts/ci-tmpfs-measurement/2026-09-06/`.
+
+The overlay ceiling is therefore 4 GiB: twice the demonstrated failing CI cap
+and about 4.9 times the measured arm64 peak. It is not reserved memory; tmpfs is
+charged only for pages used. The 16 GiB runner keeps the same full database
+production serves, synchronous commits stay on, and every load threshold,
+traffic shape, duration, and re-measure rule remains unchanged.
+
 ### 2026-08-21 — page-shaped workloads and browser timing
 
 The recommendation gate measures one endpoint. It is the SLO and it does not

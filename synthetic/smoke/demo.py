@@ -94,11 +94,18 @@ class _FixtureMetadata:
 FIXTURE_CATALOG_PATH = Path(__file__).resolve().parents[1] / "personas" / "catalog.json"
 
 # One page short of the endpoint's maximum, times enough pages to walk the whole
-# reviewed fixture. A deployment with a real MovieLens ingest behind the same
-# endpoint stops after these pages and reports what it checked, rather than
-# paging tens of thousands of rows to answer a smoke-test question.
+# reviewed fixture. The walk stops after these pages rather than paging tens of
+# thousands of rows to answer a smoke-test question — the demo database now
+# carries the full 62,423-title MovieLens catalog, and `CATALOG_SORT` below is
+# what keeps a bounded walk pointed at the rows this check is about.
 CATALOG_PAGE_LIMIT = 48
 CATALOG_MAX_PAGES = 8
+# Popularity, not title. Only the reviewed titles carry seeded interactions, so
+# sorting by it puts all 120 of them in the first three pages; under the default
+# title sort a bounded walk of a 62k catalog sees ~0 of them and the check
+# passes by never looking at anything — the exact silent-green failure it was
+# written to stop.
+CATALOG_SORT = "popular"
 COVERAGE_PERSONA_USER_ID = 900000101
 
 
@@ -408,6 +415,7 @@ def check_catalog_coverage(
     catalog_path: Path = FIXTURE_CATALOG_PATH,
     page_limit: int = CATALOG_PAGE_LIMIT,
     max_pages: int = CATALOG_MAX_PAGES,
+    sort: str = CATALOG_SORT,
 ) -> CatalogCoverage:
     """Fail when the stack serves less metadata than the fixture it was seeded from.
 
@@ -419,8 +427,10 @@ def check_catalog_coverage(
     viewer's first impression.
 
     Only titles the fixture actually has metadata for are counted, so a
-    deployment whose catalog is larger than the fixture is measured on the rows
-    the fixture owns rather than being asked to explain the rest.
+    deployment whose catalog is larger than the fixture — which every deployment
+    now is — is measured on the rows the fixture owns rather than being asked to
+    explain the other 62,303. Reaching those rows is the job of ``sort``; see
+    ``CATALOG_SORT``.
     """
     fixture = _load_fixture_catalog(catalog_path)
     served = 0
@@ -433,7 +443,7 @@ def check_catalog_coverage(
     for _ in range(max_pages):
         # The cursor is unpadded base64url (src/serving/catalog.py:286), so it
         # carries nothing a query string would need escaped.
-        query = f"limit={page_limit}" + (f"&cursor={cursor}" if cursor else "")
+        query = f"limit={page_limit}&sort={sort}" + (f"&cursor={cursor}" if cursor else "")
         payload = _get_json(
             client,
             f"{api_url.rstrip('/')}/users/{user_id}/catalog?{query}",

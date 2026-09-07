@@ -585,8 +585,11 @@ promote-revert:
 # The multi-environment plan names docker-compose.{dev,staging,prod}.yml, but
 # the dev stack already exists and already *is* two files: docker-compose.yml is
 # the stores and a Keycloak with dev credentials, docker-compose.demo.yml is the
-# application layer at ENVIRONMENT=dev over the reviewed 120-title fixture --
-# which is the "smaller dataset snapshot in dev" the plan asks for. A
+# application layer at ENVIRONMENT=dev over the demo fixture -- 515 interactions
+# across nine users, which is the "smaller dataset snapshot in dev" the plan asks
+# for. (The *catalog* is the full MovieLens 62,423 titles, because a retriever
+# cannot be served ids the database has no rows for; it is the interactions that
+# are small.) A
 # docker-compose.dev.yml would have exactly one job left: turning DEV_AUTH_BYPASS
 # on, which docker-compose.demo.yml explicitly sets to "false" so the browser
 # journeys and the load gate run against real Keycloak tokens. Flipping it in an

@@ -9,7 +9,12 @@ from sqlalchemy import Engine, create_engine, text
 
 from src.evaluation.protocol import COLD_START_THRESHOLD
 from synthetic.personas.enrich_posters import poster_url_shape_error
-from synthetic.personas.seed import load_demo_catalog, load_personas, seed_demo_personas
+from synthetic.personas.seed import (
+    load_demo_catalog,
+    load_movielens_catalog,
+    load_personas,
+    seed_demo_personas,
+)
 from synthetic.smoke.demo import DemoSmokeError, check_catalog_coverage
 
 
@@ -112,6 +117,37 @@ def test_demo_catalog_is_stable_and_covers_every_history_movie() -> None:
     assert sum(movie.overview is not None for movie in movies) == 120
 
 
+def test_movielens_snapshot_covers_the_whole_catalog_and_contains_the_fixture() -> None:
+    """The floor the reviewed fixture is laid on: every MovieLens-25M title.
+
+    W27's diagnosis in one assertion. A retriever fitted on the full dataset
+    ranks ids from a 34,461-item vocabulary; while the demo database held 120
+    movies, none of them were rows, hydration returned nothing, and the API
+    answered with the popularity fallback. The snapshot is what makes those ids
+    hydratable.
+    """
+    reviewed, _ = load_demo_catalog()
+    snapshot = load_movielens_catalog()
+
+    assert len(snapshot) == 62423
+    assert {movie.movie_id for movie in reviewed} <= {movie.movie_id for movie in snapshot}
+    # Genres and TMDB ids are the two columns the serving path joins on, so a
+    # snapshot that dropped either would seed a catalog that hydrates without a
+    # poster or ranks without a genre affinity.
+    assert all(movie.genres for movie in snapshot)
+    assert sum(movie.tmdb_id is not None for movie in snapshot) == 62316
+    # Nothing here carries artwork: enriching 62k titles is out of scope, and
+    # pretending otherwise is what would make Browse look broken rather than
+    # sparse.
+    assert not any(movie.poster_url or movie.overview or movie.details for movie in snapshot)
+    # Migration 0011 rejects a release year below 1878, and MovieLens ships one
+    # ("Passage de Venus (1874)"). It is seeded with a NULL year, not dropped.
+    assert all(
+        movie.release_year is None or 1878 <= movie.release_year <= 2100 for movie in snapshot
+    )
+    assert next(movie for movie in snapshot if movie.movie_id == 148054).release_year is None
+
+
 def test_seed_is_idempotent_and_preserves_cold_start() -> None:
     engine = _fixture_engine()
     first = seed_demo_personas(engine)
@@ -143,7 +179,8 @@ def test_seed_is_idempotent_and_preserves_cold_start() -> None:
     assert cold_rating_count == 0
     assert state_count == rating_count
     assert event_count == rating_count
-    assert first.visible_movie_count == 120
+    assert first.catalog_movie_count == 62423
+    assert first.reviewed_movie_count == 120
     assert first.recommendable_movie_count == 120
     assert first.poster_movie_count == 120
     assert first.background_rating_count == 480
@@ -258,14 +295,48 @@ def test_seed_persists_reviewed_metadata_without_live_enrichment() -> None:
         source = connection.scalar(
             text("SELECT metadata_source FROM movie_catalog_metadata WHERE movie_id = 1")
         )
+        # A title only the MovieLens snapshot knows about: visible, so Browse
+        # renders it, and honest about having nothing behind it.
+        unreviewed = connection.execute(
+            text(
+                "SELECT metadata_source, source_status, poster_url, visible "
+                "FROM movie_catalog_metadata WHERE movie_id = 148054"
+            )
+        ).one()
 
-    assert visible == 120
+    assert visible == 62423
     assert with_poster == 120
-    # 'complete' means poster *and* overview. Both are now filled for every
-    # visible title, so a 'partial' row in a seeded database means the fixture
-    # regressed, not that the snapshot is merely young.
+    # 'complete' means poster *and* overview. Both are filled for every reviewed
+    # title, so a 'partial' row among those means the fixture regressed, not
+    # that the snapshot is merely young. The other 62,303 are 'unavailable' and
+    # say so.
     assert complete == 120
     assert source == "reviewed-fixture"
+    assert unreviewed.metadata_source == "movielens"
+    assert unreviewed.source_status == "unavailable"
+    assert unreviewed.poster_url is None
+    assert unreviewed.visible
+    engine.dispose()
+
+
+def test_seed_keeps_the_reviewed_title_and_genres_over_the_bulk_snapshot() -> None:
+    """The reviewed fixture is editorial, and a 62k-row bulk load must not undo it.
+
+    Raw MovieLens spells 31 of these titles differently ("Usual Suspects, The")
+    and carries an ``IMAX`` genre on three of them. Both are deliberate edits,
+    and the genre one is load-bearing beyond the product: `demo_artifacts` reads
+    `movies` unfiltered to build its feature index, so a genre string moving
+    under it moves the committed ranker.
+    """
+    engine = _fixture_engine()
+    seed_demo_personas(engine)
+
+    with engine.connect() as connection:
+        title = connection.scalar(text('SELECT title FROM movies WHERE "movieId" = 50'))
+        genres = connection.scalar(text('SELECT genres FROM movies WHERE "movieId" = 150'))
+
+    assert title == "The Usual Suspects (1995)"
+    assert genres == "Adventure|Drama"
     engine.dispose()
 
 
@@ -360,6 +431,11 @@ def test_catalog_coverage_passes_on_a_snapshot_that_matches_the_fixture() -> Non
     assert coverage.detail_probe_movie_id == min(movie.movie_id for movie in movies)
     # The whole fixture is walked, and the walk stops when the cursor does.
     assert len(requested) == len(pages)
+    # Popularity, and not by preference: the demo database holds the full 62,423
+    # title catalog and only the reviewed titles carry seeded interactions, so
+    # the default title sort would walk eight pages of the alphabet, see none of
+    # the rows this check is about, and pass without checking anything.
+    assert all("sort=popular" in params for params in requested)
 
 
 def test_catalog_coverage_fails_when_the_detail_payload_is_missing() -> None:

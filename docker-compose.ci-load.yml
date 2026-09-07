@@ -46,15 +46,14 @@ services:
       - type: tmpfs
         target: /var/lib/postgresql/data
         tmpfs:
-          # 2 GiB against a measured 263 MB. The seeded demo data directory on a
-          # warm stack is 263 MB total — 152 MB for `movielens`, 65 MB of WAL
-          # segments, the rest catalogs and templates — and the headroom is
-          # sized for `max_wal_size`, which defaults to 1 GB and is the one part
-          # of that number a long window can actually grow. The runner has
-          # 16 GB; a tmpfs is charged as it is used, so the cap costs nothing
-          # until it is reached, and if it ever were reached Postgres would fail
-          # the gate loudly with ENOSPC rather than quietly get slower.
-          size: 2147483648
+          # 4 GiB. The full 62,423-title fixture leaves 270 MiB in PGDATA. On an
+          # arm64 reproduction its 499,384-row user-item query peaked at 832 MiB
+          # total, including 690 MiB in base/pgsql_tmp; the amd64 CI planner
+          # exceeded the old 2 GiB cap on that same spill. Doubling the observed
+          # failing ceiling gives the architecture-dependent temp plan room
+          # without weakening the fixture. The runner has 16 GB and tmpfs is
+          # charged only as used, so this is a ceiling rather than a reservation.
+          size: 4294967296
     # The image's entrypoint runs as root and does its own `mkdir -p`, `chown`
     # and `chmod 00700` on PGDATA, so a fresh tmpfs needs no uid/mode options
     # here — it is initialized exactly as an empty named volume would be.
